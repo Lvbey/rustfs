@@ -83,7 +83,7 @@ jobs:
   # Build strategy check - determine build type based on trigger
   build-check:
     name: Build Strategy Check
-    runs-on: ubicloud-standard-2
+    runs-on: ubuntu-22.04
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       build_type: ${{ steps.check.outputs.build_type }}
@@ -158,7 +158,7 @@ jobs:
     name: Build RustFS
     needs: [ build-check ]
     if: needs.build-check.outputs.should_build == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
       RUSTFLAGS: ${{ matrix.cross == 'false' && '-C target-cpu=native' || '' }}
@@ -167,40 +167,22 @@ jobs:
       matrix:
         include:
           # Linux builds
-          - os: ubicloud-standard-2
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             cross: false
             platform: linux
-          - os: ubicloud-standard-2
+          - os: ubuntu-22.04
             target: aarch64-unknown-linux-musl
             cross: true
             platform: linux
-          - os: ubicloud-standard-2
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             cross: false
             platform: linux
-          - os: ubicloud-standard-2
+          - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             cross: true
             platform: linux
-          # macOS builds
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            cross: false
-            platform: macos
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            cross: false
-            platform: macos
-          # Windows builds (temporarily disabled)
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            cross: false
-            platform: windows
-          #- os: windows-latest
-          #  target: aarch64-pc-windows-msvc
-          #  cross: true
-          #  platform: windows
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -448,276 +430,3 @@ jobs:
           path: "rustfs-*.zip"
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
-  # Build summary
-  build-summary:
-    name: Build Summary
-    needs: [ build-check, build-rustfs ]
-    if: always() && needs.build-check.outputs.should_build == 'true'
-    runs-on: ubicloud-standard-2
-    steps:
-      - name: Build completion summary
-        shell: bash
-        run: |
-          BUILD_TYPE="${{ needs.build-check.outputs.build_type }}"
-          VERSION="${{ needs.build-check.outputs.version }}"
-
-          echo "🎉 Build completed successfully!"
-          echo "📦 Build type: $BUILD_TYPE"
-          echo "🔢 Version: $VERSION"
-          echo ""
-
-          # Check build status
-          BUILD_STATUS="${{ needs.build-rustfs.result }}"
-
-          echo "📊 Build Results:"
-          echo "  📦 All platforms: $BUILD_STATUS"
-          echo ""
-
-          case "$BUILD_TYPE" in
-            "development")
-              echo "🛠️  Development build artifacts have been uploaded to OSS dev directory"
-              echo "⚠️  This is a development build - not suitable for production use"
-              ;;
-            "release")
-              echo "🚀 Release build artifacts have been uploaded to OSS release directory"
-              echo "✅ This build is ready for production use"
-              echo "🏷️  GitHub Release will be created in this workflow"
-              ;;
-            "prerelease")
-              echo "🧪 Prerelease build artifacts have been uploaded to OSS release directory"
-              echo "⚠️  This is a prerelease build - use with caution"
-              echo "🏷️  GitHub Release will be created in this workflow"
-              ;;
-          esac
-
-          echo ""
-          echo "🐳 Docker Images:"
-          if [[ "${{ github.event.inputs.build_docker }}" == "false" ]]; then
-            echo "⏭️  Docker image build was skipped (binary only build)"
-          elif [[ "$BUILD_STATUS" == "success" ]]; then
-            echo "🔄 Docker images will be built and pushed automatically via workflow_run event"
-          else
-            echo "❌ Docker image build will be skipped due to build failure"
-          fi
-
-  # Create GitHub Release (only for tag pushes)
-  create-release:
-    name: Create GitHub Release
-    needs: [ build-check, build-rustfs ]
-    if: startsWith(github.ref, 'refs/tags/') && needs.build-check.outputs.build_type != 'development'
-    runs-on: ubicloud-standard-2
-    permissions:
-      contents: write
-    outputs:
-      release_id: ${{ steps.create.outputs.release_id }}
-      release_url: ${{ steps.create.outputs.release_url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Create GitHub Release
-        id: create
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          TAG="${{ needs.build-check.outputs.version }}"
-          VERSION="${{ needs.build-check.outputs.version }}"
-          IS_PRERELEASE="${{ needs.build-check.outputs.is_prerelease }}"
-          BUILD_TYPE="${{ needs.build-check.outputs.build_type }}"
-
-          # Determine release type for title
-          if [[ "$BUILD_TYPE" == "prerelease" ]]; then
-            if [[ "$TAG" == *"alpha"* ]]; then
-              RELEASE_TYPE="alpha"
-            elif [[ "$TAG" == *"beta"* ]]; then
-              RELEASE_TYPE="beta"
-            elif [[ "$TAG" == *"rc"* ]]; then
-              RELEASE_TYPE="rc"
-            else
-              RELEASE_TYPE="prerelease"
-            fi
-          else
-            RELEASE_TYPE="release"
-          fi
-
-          # Check if release already exists
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists"
-            RELEASE_ID=$(gh release view "$TAG" --json databaseId --jq '.databaseId')
-            RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
-          else
-            # Get release notes from tag message
-            RELEASE_NOTES=$(git tag -l --format='%(contents)' "${TAG}")
-            if [[ -z "$RELEASE_NOTES" || "$RELEASE_NOTES" =~ ^[[:space:]]*$ ]]; then
-              if [[ "$IS_PRERELEASE" == "true" ]]; then
-                RELEASE_NOTES="Pre-release ${VERSION} (${RELEASE_TYPE})"
-              else
-                RELEASE_NOTES="Release ${VERSION}"
-              fi
-            fi
-
-            # Create release title
-            if [[ "$IS_PRERELEASE" == "true" ]]; then
-              TITLE="RustFS $VERSION (${RELEASE_TYPE})"
-            else
-              TITLE="RustFS $VERSION"
-            fi
-
-            # Create the release
-            PRERELEASE_FLAG=""
-            if [[ "$IS_PRERELEASE" == "true" ]]; then
-              PRERELEASE_FLAG="--prerelease"
-            fi
-
-            gh release create "$TAG" \
-              --title "$TITLE" \
-              --notes "$RELEASE_NOTES" \
-              $PRERELEASE_FLAG \
-              --draft
-
-            RELEASE_ID=$(gh release view "$TAG" --json databaseId --jq '.databaseId')
-            RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
-          fi
-
-          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-          echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
-          echo "Created release: $RELEASE_URL"
-
-  # Prepare and upload release assets
-  upload-release-assets:
-    name: Upload Release Assets
-    needs: [ build-check, build-rustfs, create-release ]
-    if: startsWith(github.ref, 'refs/tags/') && needs.build-check.outputs.build_type != 'development'
-    runs-on: ubicloud-standard-2
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: ./artifacts
-          pattern: rustfs-*
-          merge-multiple: true
-
-      - name: Prepare release assets
-        id: prepare
-        shell: bash
-        run: |
-          VERSION="${{ needs.build-check.outputs.version }}"
-          TAG="${{ needs.build-check.outputs.version }}"
-
-          mkdir -p ./release-assets
-
-          # Copy and verify artifacts (including latest files created during build)
-          ASSETS_COUNT=0
-          for file in ./artifacts/*.zip; do
-            if [[ -f "$file" ]]; then
-              cp "$file" ./release-assets/
-              ASSETS_COUNT=$((ASSETS_COUNT + 1))
-            fi
-          done
-
-          if [[ $ASSETS_COUNT -eq 0 ]]; then
-            echo "❌ No artifacts found!"
-            exit 1
-          fi
-
-          cd ./release-assets
-
-          # Generate checksums for all files (including latest versions)
-          if ls *.zip >/dev/null 2>&1; then
-            sha256sum *.zip > SHA256SUMS
-            sha512sum *.zip > SHA512SUMS
-          fi
-
-          # Create signature placeholder files
-          for file in *.zip; do
-            echo "# Signature for $file" > "${file}.asc"
-            echo "# GPG signature will be added in future versions" >> "${file}.asc"
-          done
-
-          echo "📦 Prepared assets:"
-          ls -la
-
-          echo "🔢 Total asset count: $ASSETS_COUNT"
-
-      - name: Upload to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          TAG="${{ needs.build-check.outputs.version }}"
-
-          cd ./release-assets
-
-          # Upload all files
-          for file in *; do
-            if [[ -f "$file" ]]; then
-              echo "📤 Uploading $file..."
-              gh release upload "$TAG" "$file" --clobber
-            fi
-          done
-
-          echo "✅ All assets uploaded successfully"
-
-  # Update latest.json for stable releases only
-  
-  # Publish release (remove draft status)
-  publish-release:
-    name: Publish Release
-    needs: [ build-check, create-release, upload-release-assets ]
-    if: startsWith(github.ref, 'refs/tags/') && needs.build-check.outputs.build_type != 'development'
-    runs-on: ubicloud-standard-2
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Update release notes and publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          TAG="${{ needs.build-check.outputs.version }}"
-          VERSION="${{ needs.build-check.outputs.version }}"
-          IS_PRERELEASE="${{ needs.build-check.outputs.is_prerelease }}"
-          BUILD_TYPE="${{ needs.build-check.outputs.build_type }}"
-
-          # Determine release type
-          if [[ "$BUILD_TYPE" == "prerelease" ]]; then
-            if [[ "$TAG" == *"alpha"* ]]; then
-              RELEASE_TYPE="alpha"
-            elif [[ "$TAG" == *"beta"* ]]; then
-              RELEASE_TYPE="beta"
-            elif [[ "$TAG" == *"rc"* ]]; then
-              RELEASE_TYPE="rc"
-            else
-              RELEASE_TYPE="prerelease"
-            fi
-          else
-            RELEASE_TYPE="release"
-          fi
-
-          # Get original release notes from tag
-          ORIGINAL_NOTES=$(git tag -l --format='%(contents)' "${TAG}")
-          if [[ -z "$ORIGINAL_NOTES" || "$ORIGINAL_NOTES" =~ ^[[:space:]]*$ ]]; then
-            if [[ "$IS_PRERELEASE" == "true" ]]; then
-              ORIGINAL_NOTES="Pre-release ${VERSION} (${RELEASE_TYPE})"
-            else
-              ORIGINAL_NOTES="Release ${VERSION}"
-            fi
-          fi
-
-          # Publish the release (remove draft status)
-          gh release edit "$TAG" --draft=false
-
-          echo "🎉 Released $TAG successfully!"
-          echo "📄 Release URL: ${{ needs.create-release.outputs.release_url }}"
