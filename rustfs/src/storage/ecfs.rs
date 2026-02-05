@@ -3721,7 +3721,14 @@ impl S3 for FS {
         // S3 API requires the marker field to be echoed back in the response
         let request_marker = req.input.marker.clone();
 
-        let v2_resp = self.list_objects_v2(req.map_input(Into::into)).await?;
+        // Convert ListObjectsInput to ListObjectsV2Input with fetch_owner=true
+        // ListObjects (v1) API should always return Owner field by default per AWS S3 specification
+        let v2_input: ListObjectsV2Input = req.input.clone().into();
+        let v2_req = req.map_input(|_| ListObjectsV2Input {
+            fetch_owner: Some(true), // Force fetch_owner=true for v1 API
+            ..v2_input
+        });
+        let v2_resp = self.list_objects_v2(v2_req).await?;
 
         Ok(v2_resp.map_output(|v2| {
             // For ListObjects (v1) API, NextMarker should be the last item returned when truncated
@@ -3762,7 +3769,6 @@ impl S3 for FS {
             let marker = Some(request_marker.unwrap_or_default());
 
             ListObjectsOutput {
-                contents: v2.contents,
                 delimiter: v2.delimiter,
                 encoding_type: v2.encoding_type,
                 name: v2.name,
@@ -3772,6 +3778,7 @@ impl S3 for FS {
                 is_truncated: v2.is_truncated,
                 marker,
                 next_marker,
+                contents: v2.contents,
                 ..Default::default()
             }
         }))
@@ -3918,12 +3925,12 @@ impl S3 for FS {
             start_after: response_start_after,
             key_count: Some(key_count),
             max_keys: Some(max_keys),
-            contents: Some(objects),
             delimiter,
             encoding_type: encoding_type.clone(),
             name: Some(bucket),
             prefix: Some(prefix),
             common_prefixes: Some(common_prefixes),
+            contents: Some(objects),
             ..Default::default()
         };
 
